@@ -8,7 +8,7 @@
                                           |_|
 dns_scorpion.py  v1.1 FINAL
 Powered by Sailerbross Technology
-The DNS tool that makes dig obsolete.
+The DNS tool that makes dig look like a toy.
 Termux-safe | 15+ record types | ASN | SSL | Headers |
 Spoof-test | Auto-recon | HTML report | Industry-grade
 """
@@ -25,6 +25,7 @@ import string
 import threading
 import argparse
 import re
+import struct
 import hashlib
 from queue       import Queue, Empty
 from datetime    import datetime
@@ -96,15 +97,15 @@ REC_COLOR = {
 }
 
 # ============================================================
-# FALLBACK NAMESERVERS (Termux-safe)
+# FALLBACK NAMESERVERS  (Termux-safe — no /etc/resolv.conf)
 # ============================================================
 FALLBACK_NS = [
-    "8.8.8.8",          # Google Primary
-    "8.8.4.4",          # Google Secondary
-    "1.1.1.1",          # Cloudflare Primary
-    "1.0.0.1",          # Cloudflare Secondary
-    "9.9.9.9",          # Quad9
-    "208.67.222.222",   # OpenDNS
+    "8.8.8.8",
+    "8.8.4.4",
+    "1.1.1.1",
+    "1.0.0.1",
+    "9.9.9.9",
+    "208.67.222.222",
 ]
 
 # ============================================================
@@ -205,15 +206,15 @@ MAIL_PROVIDERS = {
 # DKIM SELECTORS
 # ============================================================
 DKIM_SELECTORS = [
-    "default", "google", "mail", "email",
-    "k1", "k2", "k3",
-    "selector1", "selector2",
-    "s1", "s2",
-    "dkim", "dkimmail",
-    "smtp", "smtpapi",
-    "sendgrid", "mailgun",
-    "protonmail", "zoho", "mimecast",
-    "20161025", "20210112", "20230601",
+    "default","google","mail","email",
+    "k1","k2","k3",
+    "selector1","selector2",
+    "s1","s2",
+    "dkim","dkimmail",
+    "smtp","smtpapi",
+    "sendgrid","mailgun",
+    "protonmail","zoho","mimecast",
+    "20161025","20210112","20230601",
 ]
 
 # ============================================================
@@ -616,8 +617,8 @@ def score_bar(score, width=30):
 # ALL RECORD TYPES
 # ============================================================
 ALL_TYPES = [
-    'A', 'AAAA', 'MX', 'NS', 'TXT', 'CNAME',
-    'SOA', 'PTR', 'SRV', 'CAA', 'DNSKEY', 'DS', 'TLSA', 'NAPTR'
+    'A','AAAA','MX','NS','TXT','CNAME',
+    'SOA','PTR','SRV','CAA','DNSKEY','DS','TLSA','NAPTR'
 ]
 
 def lookup_records(resolver, domain, types=None):
@@ -655,9 +656,20 @@ def print_records(records_dict, mode="normal"):
         print(f"  {color}└{'─'*50}┘{C.RESET}")
 
 # ============================================================
-# ASN / IP OWNERSHIP LOOKUP
+# ══════════════════════════════════════════════════════════
+#  NEW v1.1 FEATURES
+# ══════════════════════════════════════════════════════════
 # ============================================================
+
+# ────────────────────────────────────────────────────────────
+# 1. ASN / IP OWNERSHIP LOOKUP
+#    Uses RIPE Stat public API (no API key needed)
+# ────────────────────────────────────────────────────────────
 def asn_lookup(ip):
+    """
+    Query RIPE Stat API for IP ownership, ASN, country.
+    Falls back to whois-style TCP query if HTTP unavailable.
+    """
     result = {
         "ip":       ip,
         "asn":      "",
@@ -717,10 +729,14 @@ def print_asn(result):
     box_line("Country:",     result["country"]  or "N/A", C.DIM, C.YELLOW)
     box_line("Prefix:",      result["prefix"]   or "N/A", C.DIM, C.DIM)
 
-# ============================================================
-# SSL / TLS CERTIFICATE INFO
-# ============================================================
+# ────────────────────────────────────────────────────────────
+# 2. SSL / TLS CERTIFICATE INFO
+# ────────────────────────────────────────────────────────────
 def ssl_info(domain, port=443, timeout=8):
+    """
+    Connect via SSL and pull certificate details.
+    No third-party lib — pure stdlib ssl module.
+    """
     result = {
         "domain":       domain,
         "port":         port,
@@ -838,10 +854,14 @@ def print_ssl(result):
     if not result["warnings"]:
         ok("Certificate looks healthy")
 
-# ============================================================
-# HTTP SECURITY HEADERS
-# ============================================================
+# ────────────────────────────────────────────────────────────
+# 3. HTTP SECURITY HEADERS
+# ────────────────────────────────────────────────────────────
 def check_headers(domain, timeout=8):
+    """
+    Fetch HTTP headers and grade security headers.
+    Returns dict of found/missing headers + score.
+    """
     result = {
         "domain":  domain,
         "url":     "",
@@ -955,10 +975,15 @@ def print_headers(result):
             if hdr in ("X-Powered-By","X-AspNet-Version","X-Generator"):
                 warn(f"Technology exposed via {hdr} — consider hiding this")
 
-# ============================================================
-# EMAIL SPOOFING TEST
-# ============================================================
+# ────────────────────────────────────────────────────────────
+# 4. EMAIL SPOOFING TEST
+# ────────────────────────────────────────────────────────────
 def spoof_test(resolver, domain, txt_records=None):
+    """
+    Determine if the domain can be spoofed based on
+    SPF + DMARC configuration.
+    Returns a full risk assessment.
+    """
     if txt_records is None:
         txt_records = safe_resolve(resolver, domain, 'TXT')
 
@@ -967,7 +992,7 @@ def spoof_test(resolver, domain, txt_records=None):
 
     risks  = []
     blocks = []
-    score  = 0
+    score  = 0   # 0 = no protection, 100 = fully protected
 
     # SPF evaluation
     if not spf["found"]:
@@ -1059,13 +1084,26 @@ def print_spoof(result):
 
     print(f"\n  {C.DIM}SPF policy  : {result['spf'].get('all_tag','none') or 'not found'}{C.RESET}")
     print(f"  {C.DIM}DMARC policy: {result['dmarc'].get('policy','not found') or 'not found'}{C.RESET}")
-    print(f"  {C.DIM}DKIM found  : {'yes ('+result['dkim'][0]['selector']+')' if result['dkim'] else 'no'}{C.RESET}")
+    dkim_status = f"yes ({result['dkim'][0]['selector']})" if result['dkim'] else 'no'
+    print(f"  {C.DIM}DKIM found  : {dkim_status}{C.RESET}")
 
-# ============================================================
-# AUTO-RECON
-# ============================================================
+# ────────────────────────────────────────────────────────────
+# 5. AUTO-RECON (runs EVERYTHING automatically)
+# ────────────────────────────────────────────────────────────
 def auto_recon(resolver, domain, mode="normal",
                output_file=None, output_fmt="html"):
+    """
+    One command that runs:
+      1. Full DNS lookup (all types)
+      2. Deep analysis (SPF/DMARC/DKIM/provider/CDN/score)
+      3. SSL certificate info
+      4. HTTP security headers
+      5. Email spoofing test
+      6. ASN lookup for each A record
+      7. Propagation check
+      8. Zone transfer attempt
+    Then exports a full HTML report.
+    """
     print(f"\n{C.YELLOW}{C.BOLD}{'═'*62}{C.RESET}")
     print(f"{C.YELLOW}{C.BOLD}  🦂 DNS SCORPION AUTO-RECON — {domain}{C.RESET}")
     print(f"{C.YELLOW}{C.BOLD}  ⚡ Sailerbross Technology — Full Automated Audit{C.RESET}")
@@ -1093,12 +1131,8 @@ def auto_recon(resolver, domain, mode="normal",
 
     print(f"  {C.CYAN}Running {len(steps)} audit modules...{C.RESET}\n")
 
-    def _step(n, title):
-        print(f"\n{C.MAGENTA}{C.BOLD}[{n}] {title}{C.RESET}")
-        print(f"  {C.DIM}{'─'*55}{C.RESET}")
-
-    # Step 1
-    _step(1, "DNS Records — All Types")
+    # ── Step 1: DNS Records ───────────────────────────────
+    _step_header(1, "DNS Records — All Types")
     records_dict = lookup_records(resolver, domain)
     print_records(records_dict, mode)
     report["sections"]["dns_records"] = {
@@ -1113,95 +1147,47 @@ def auto_recon(resolver, domain, mode="normal",
     caa_records = records_dict.get('CAA', [])
     cname_recs  = records_dict.get('CNAME', [])
 
-    # Step 2
-    _step(2, "Deep DNS Analysis")
-    
-    # Manual deep analysis inline
-    section("Intelligence", C.BLUE)
-    dns_prov  = detect_dns_provider(ns_records)
-    cdn       = detect_cdn(cname_recs, a_records)
-    mail_prov = detect_mail_provider(mx_records)
-    box_line("DNS Provider:",  dns_prov, C.DIM, C.CYAN)
-    box_line("CDN:",           cdn or "None", C.DIM, C.GREEN if cdn else C.DIM)
-    box_line("Mail Provider:", mail_prov, C.DIM, C.YELLOW)
-    
-    section("SPF Analysis", C.MAGENTA)
-    spf = analyze_spf(txt_records)
-    if spf["found"]:
-        ok("SPF record found")
-        box_line("All tag:", spf["all_tag"] or "none", C.DIM,
-                 C.GREEN if spf["all_tag"] in ('-','~') else C.RED)
-    else:
-        warn("No SPF record")
-    
-    section("DMARC Analysis", C.MAGENTA)
-    dmarc = analyze_dmarc(resolver, domain)
-    if dmarc["found"]:
-        ok("DMARC record found")
-        box_line("Policy:", dmarc["policy"].upper(), C.DIM,
-                 C.GREEN if dmarc["policy"] == "reject" else C.YELLOW)
-    else:
-        warn("No DMARC record")
-    
-    section("DKIM Check", C.MAGENTA)
-    dkim = check_dkim(resolver, domain)
-    if dkim:
-        ok(f"DKIM found — selector: {dkim[0]['selector']}")
-    else:
-        warn("No DKIM found")
-    
-    section("Mail Security Score", C.YELLOW)
-    ms = mail_security_score(spf, dmarc, dkim, mx_records, caa_records)
-    print(f"\n  {score_bar(ms)}\n")
-    
-    analysis = {
-        "intelligence": {
-            "dns_provider": dns_prov,
-            "cdn": cdn or "None",
-            "mail_provider": mail_prov,
-        },
-        "spf": spf,
-        "dmarc": dmarc,
-        "dkim": dkim,
-        "mail_security_score": ms,
-        "warnings": spf["warnings"] + dmarc["warnings"],
-    }
+    # ── Step 2: Deep Analysis ─────────────────────────────
+    _step_header(2, "Deep DNS Analysis")
+    analysis = deep_analyze(resolver, domain, mode)
     report["sections"]["analysis"] = analysis
 
-    # Step 3
-    _step(3, "SSL/TLS Certificate")
+    # ── Step 3: SSL Certificate ───────────────────────────
+    _step_header(3, "SSL/TLS Certificate")
     ssl_result = ssl_info(domain)
     print_ssl(ssl_result)
     report["sections"]["ssl"] = ssl_result
 
-    # Step 4
-    _step(4, "HTTP Security Headers")
+    # ── Step 4: HTTP Security Headers ─────────────────────
+    _step_header(4, "HTTP Security Headers")
     hdr_result = check_headers(domain)
     print_headers(hdr_result)
     report["sections"]["headers"] = hdr_result
 
-    # Step 5
-    _step(5, "Email Spoofing Risk Assessment")
+    # ── Step 5: Spoof Test ────────────────────────────────
+    _step_header(5, "Email Spoofing Risk Assessment")
     spoof_result = spoof_test(resolver, domain, txt_records)
     print_spoof(spoof_result)
     report["sections"]["spoof"] = spoof_result
 
-    # Step 6
-    _step(6, "ASN / IP Ownership")
+    # ── Step 6: ASN Lookup ────────────────────────────────
+    _step_header(6, "ASN / IP Ownership")
     asn_results = []
-    for ip, _ in a_records[:4]:
+    for ip, _ in a_records[:4]:    # max 4 IPs
         asn_r = asn_lookup(ip)
         print_asn(asn_r)
         asn_results.append(asn_r)
     report["sections"]["asn"] = asn_results
 
-    # Step 7
-    _step(7, "DNS Propagation Check")
+    # ── Step 7: Propagation ───────────────────────────────
+    _step_header(7, "DNS Propagation Check")
     prop = check_propagation(domain, 'A', timeout=5)
-    report["sections"]["propagation"] = {k: v for k, v in prop.items()}
+    report["sections"]["propagation"] = {
+        k: v for k, v in prop.items()
+    }
 
-    # Step 8
-    _step(8, "Zone Transfer Attempt")
+    # ── Step 8: Zone Transfer ─────────────────────────────
+    _step_header(8, "Zone Transfer Attempt")
     zt_recs, zt_status = attempt_axfr(resolver, domain)
     if zt_recs:
         warn(f"ZONE TRANSFER SUCCESSFUL! {len(zt_recs)} records exposed!")
@@ -1213,32 +1199,51 @@ def auto_recon(resolver, domain, mode="normal",
         "status": zt_status, "records": zt_recs
     }
 
-    # Summary
+    # ── FINAL SUMMARY ─────────────────────────────────────
+    _print_autorecon_summary(domain, analysis, ssl_result,
+                             hdr_result, spoof_result)
+
+    # ── EXPORT ────────────────────────────────────────────
+    if output_file is None:
+        safe = domain.replace('.', '_')
+        output_file = f"scorpion_{safe}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+    export_results(report, output_file, output_fmt)
+    return report
+
+def _step_header(n, title):
+    print(f"\n{C.MAGENTA}{C.BOLD}[{n}] {title}{C.RESET}")
+    print(f"  {C.DIM}{'─'*55}{C.RESET}")
+
+def _print_autorecon_summary(domain, analysis, ssl_r, hdr_r, spoof_r):
     print(f"\n{C.CYAN}{C.BOLD}{'═'*62}{C.RESET}")
     print(f"{C.YELLOW}{C.BOLD}  🦂 AUTO-RECON SUMMARY — {domain}{C.RESET}")
     print(f"{C.CYAN}{C.BOLD}{'═'*62}{C.RESET}\n")
 
-    hs = hdr_result.get("score", 0)
-    ss = spoof_result.get("score", 0)
+    ms = analysis.get("mail_security_score", 0) if isinstance(analysis, dict) else 0
+    hs = hdr_r.get("score", 0)
+    ss = spoof_r.get("score", 0)
 
-    box_line("Mail Security Score:", score_bar(ms, width=20), C.DIM, "")
+    box_line("Mail Security Score:",
+             score_bar(ms, width=20), C.DIM, "")
     box_line("HTTP Header Grade:",
-             f"{hdr_result.get('grade','?')} ({hs}/100)", C.DIM,
+             f"{hdr_r.get('grade','?')} ({hs}/100)", C.DIM,
              C.GREEN if hs >= 60 else C.RED)
     box_line("Spoof Protection:",
-             f"{spoof_result['verdict']} ({ss}/100)",
-             C.DIM, spoof_result.get("color", C.WHITE))
+             f"{spoof_r['verdict']} ({ss}/100)",
+             C.DIM, spoof_r.get("color", C.WHITE))
 
-    if ssl_result.get("days_left") is not None:
-        dc = C.GREEN if ssl_result["days_left"] >= 30 else C.RED
+    if ssl_r.get("days_left") is not None:
+        dc = C.GREEN if ssl_r["days_left"] >= 30 else C.RED
         box_line("SSL Expires in:",
-                 f"{ssl_result['days_left']} days", C.DIM, dc)
+                 f"{ssl_r['days_left']} days", C.DIM, dc)
 
-    all_warnings = (
-        analysis.get("warnings", []) +
-        ssl_result.get("warnings", []) +
-        spoof_result.get("risks", [])
-    )
+    # All warnings combined
+    all_warnings = []
+    if isinstance(analysis, dict):
+        all_warnings += analysis.get("warnings", [])
+    all_warnings += ssl_r.get("warnings", [])
+    all_warnings += spoof_r.get("risks", [])
 
     if all_warnings:
         print(f"\n  {C.RED}{C.BOLD}⚠ Combined Warnings ({len(all_warnings)}):{C.RESET}")
@@ -1251,16 +1256,8 @@ def auto_recon(resolver, domain, mode="normal",
     print(f"{C.MAGENTA}{C.BOLD}  ⚡ Auto-Recon complete — Sailerbross Technology{C.RESET}")
     print(f"{C.CYAN}{C.BOLD}{'═'*62}{C.RESET}\n")
 
-    # Export
-    if output_file is None:
-        safe = domain.replace('.', '_')
-        output_file = f"scorpion_{safe}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-
-    export_results(report, output_file, output_fmt)
-    return report
-
 # ============================================================
-# CORE FEATURES (unchanged)
+# CORE v1.0 FEATURES (UNCHANGED)
 # ============================================================
 def reverse_lookup(resolver, ip):
     section(f"Reverse DNS — {ip}", C.CYAN)
@@ -1483,8 +1480,155 @@ def bulk_lookup(resolver, filepath, types=None, output_file=None):
         )
     return all_r
 
+def deep_analyze(resolver, domain, mode="normal"):
+    print(f"\n{C.CYAN}{C.BOLD}{'═'*62}{C.RESET}")
+    print(f"{C.YELLOW}{C.BOLD}  🦂 DNS SCORPION ANALYSIS — {domain}{C.RESET}")
+    print(f"{C.CYAN}{C.BOLD}  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}{C.RESET}")
+    print(f"{C.CYAN}{C.BOLD}{'═'*62}{C.RESET}")
+
+    all_warnings = []
+    results      = {}
+
+    section("All DNS Records", C.CYAN)
+    records_dict = lookup_records(resolver, domain)
+    results["records"] = {
+        rt: [{"value": v, "ttl": t} for v, t in recs]
+        for rt, recs in records_dict.items()
+    }
+    print_records(records_dict, mode)
+
+    a_recs    = records_dict.get('A',    [])
+    mx_recs   = records_dict.get('MX',   [])
+    ns_recs   = records_dict.get('NS',   [])
+    txt_recs  = records_dict.get('TXT',  [])
+    cname_r   = records_dict.get('CNAME',[])
+    caa_recs  = records_dict.get('CAA',  [])
+    soa_recs  = records_dict.get('SOA',  [])
+    dnskey_r  = records_dict.get('DNSKEY',[])
+
+    section("Intelligence", C.BLUE)
+    dns_prov  = detect_dns_provider(ns_recs)
+    cdn       = detect_cdn(cname_r, a_recs)
+    mail_prov = detect_mail_provider(mx_recs)
+    box_line("DNS Provider:",  dns_prov, C.DIM, C.CYAN)
+    box_line("CDN:",           cdn or "None detected", C.DIM,
+             C.GREEN if cdn else C.DIM)
+    box_line("Mail Provider:", mail_prov, C.DIM, C.YELLOW)
+
+    if soa_recs:
+        parts = soa_recs[0][0].split()
+        if len(parts) >= 2:
+            box_line("Primary NS:", parts[0], C.DIM, C.WHITE)
+            box_line("DNS Admin:", parts[1], C.DIM, C.WHITE)
+
+    if caa_recs:
+        ok("CAA record found — SSL issuance restricted")
+        for val, _ in caa_recs:
+            info(f"CAA: {val}")
+    else:
+        warn("No CAA record — any CA can issue SSL cert for this domain")
+        all_warnings.append("No CAA record")
+
+    if dnskey_r:
+        ok("DNSSEC enabled")
+    else:
+        tip("DNSSEC not detected — DNS spoofing possible")
+
+    results["intelligence"] = {
+        "dns_provider": dns_prov,
+        "cdn":          cdn or "None",
+        "mail_provider":mail_prov,
+    }
+
+    section("Wildcard DNS", C.YELLOW)
+    is_wc, wc_ips = check_wildcard(resolver, domain)
+    if is_wc:
+        warn(f"Wildcard DNS active → {wc_ips}")
+        all_warnings.append("Wildcard DNS active")
+    else:
+        ok("No wildcard DNS")
+    results["wildcard"] = {"active": is_wc, "ips": list(wc_ips)}
+
+    section("SPF Analysis", C.MAGENTA)
+    spf = analyze_spf(txt_recs)
+    results["spf"] = spf
+    if spf["found"]:
+        ok("SPF record found")
+        box_line("Record:", spf["raw"][:60], C.DIM, C.WHITE)
+        box_line("All tag:", spf["all_tag"] or "none", C.DIM,
+                 C.GREEN if spf["all_tag"] in ('-','~') else C.RED)
+        box_line("DNS lookups:", f"{spf['lookups']}/10", C.DIM,
+                 C.GREEN if spf["lookups"] <= 10 else C.RED)
+    else:
+        warn("No SPF record found")
+    for w in spf["warnings"]:
+        warn(w)
+        all_warnings.append(w)
+
+    section("DMARC Analysis", C.MAGENTA)
+    dmarc = analyze_dmarc(resolver, domain)
+    results["dmarc"] = dmarc
+    if dmarc["found"]:
+        ok("DMARC record found")
+        box_line("Record:", dmarc["raw"][:60], C.DIM, C.WHITE)
+        pc = (C.GREEN  if dmarc["policy"] == "reject"     else
+              C.YELLOW if dmarc["policy"] == "quarantine" else C.RED)
+        box_line("Policy:", dmarc["policy"].upper(), C.DIM, pc)
+        box_line("Enforcement:", f"{dmarc['pct']}%", C.DIM,
+                 C.GREEN if dmarc['pct'] == 100 else C.YELLOW)
+        if dmarc["rua"]:
+            box_line("Reports to:", dmarc["rua"], C.DIM, C.DIM)
+    else:
+        warn("No DMARC record")
+    for w in dmarc["warnings"]:
+        warn(w)
+        all_warnings.append(w)
+
+    section("DKIM Check", C.MAGENTA)
+    print(f"  {C.DIM}Checking {len(DKIM_SELECTORS)} selectors...{C.RESET}")
+    dkim = check_dkim(resolver, domain)
+    results["dkim"] = dkim
+    if dkim:
+        for dk in dkim:
+            ok(f"DKIM found — selector: {dk['selector']}")
+    else:
+        warn("No DKIM found for common selectors")
+        all_warnings.append("No DKIM found")
+
+    section("Mail Security Score", C.YELLOW)
+    score = mail_security_score(spf, dmarc, dkim, mx_recs, caa_recs)
+    results["mail_security_score"] = score
+    print(f"\n  {score_bar(score)}\n")
+
+    section("Zone Transfer (AXFR)", C.RED)
+    zt_recs, zt_status = attempt_axfr(resolver, domain)
+    results["zone_transfer"] = {
+        "status": zt_status, "records": zt_recs
+    }
+    if zt_recs:
+        warn(f"ZONE TRANSFER SUCCESS! {len(zt_recs)} records exposed!")
+        all_warnings.append("Zone transfer allowed — critical!")
+        for r in zt_recs[:20]:
+            print(f"  {co(r, C.RED)}")
+    else:
+        ok(f"Zone transfer: {zt_status}")
+
+    section("Warnings Summary", C.RED)
+    results["warnings"] = all_warnings
+    if all_warnings:
+        for i, w in enumerate(all_warnings, 1):
+            print(f"  {co(str(i)+'.', C.RED, C.BOLD)} {co(w, C.YELLOW)}")
+    else:
+        ok("No critical issues found!")
+
+    print(f"\n{C.CYAN}{C.BOLD}{'═'*62}{C.RESET}")
+    print(f"{C.MAGENTA}{C.BOLD}  ⚡ Analysis complete — Sailerbross Technology{C.RESET}")
+    print(f"{C.CYAN}{C.BOLD}{'═'*62}{C.RESET}\n")
+
+    return results
+
 # ============================================================
-# EXPORT ENGINE
+# EXPORT ENGINE (txt / json / csv / html)
 # ============================================================
 def export_results(data, output_file, fmt="html"):
     fmt = fmt.lower()
@@ -1554,6 +1698,7 @@ def _export_html(data, path):
     domain   = data.get("domain","unknown")
     date_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
+    # Pull data from either auto-recon or analyze format
     secs     = data.get("sections", {})
     analysis = secs.get("analysis", data)
     ssl_r    = secs.get("ssl", {})
@@ -1571,6 +1716,7 @@ def _export_html(data, path):
            "#f1c40f" if ms >= 70 else
            "#e67e22" if ms >= 50 else "#e74c3c")
 
+    # DNS record rows
     rec_rows = ""
     for rtype, recs in records.items():
         for r in recs:
@@ -1581,12 +1727,14 @@ def _export_html(data, path):
                 f"<td>{v}</td><td>{t}s</td></tr>"
             )
 
+    # Warning rows
     warn_rows = (
         "".join(
             f"<li>⚠ {w}</li>" for w in warnings
         ) or "<li style='color:#2ecc71'>✅ No critical issues</li>"
     )
 
+    # SSL info
     ssl_html = ""
     if ssl_r and not ssl_r.get("error"):
         dl = ssl_r.get("days_left","?")
@@ -1609,6 +1757,7 @@ def _export_html(data, path):
           <p><b>SANs:</b> {', '.join(ssl_r.get('san',[])[:10])}</p>
         </div>"""
 
+    # Header info
     hdr_html = ""
     if hdr_r:
         gc = ("#2ecc71" if hs >= 80 else
@@ -1630,6 +1779,7 @@ def _export_html(data, path):
           <ul>{found_h}{miss_h}</ul>
         </div>"""
 
+    # Spoof info
     spoof_html = ""
     if spoof_r:
         vc = ("#2ecc71" if spoof_r.get("score",0) >= 80 else
@@ -1649,6 +1799,7 @@ def _export_html(data, path):
           </ul>
         </div>"""
 
+    # ASN info
     asn_html = ""
     if asn_list:
         rows = ""
@@ -1748,7 +1899,7 @@ def _export_html(data, path):
     <div class="lbl">HTTP Headers<br>/100</div>
   </div>
   <div class="score-box">
-    <div class="val" style="color:{('#2ecc71' if ss>=80 else '#f1c40f' if ss>=40 else '#e74c3c')}">{ss}</div>
+    <div class="val" style="color:{vc if (vc:=('#2ecc71' if ss>=80 else '#f1c40f' if ss>=40 else '#e74c3c')) else '#e74c3c'}">{ss}</div>
     <div class="lbl">Spoof Protection<br>/100</div>
   </div>
   <div class="score-box">
@@ -1806,6 +1957,7 @@ class ScorpionShell:
     def _refresh(self):
         self.resolver = make_resolver(self.custom_ns, self.timeout)
 
+    # ── Core v1.0 ─────────────────────────────────────────
     def do_lookup(self, args):
         parts  = args.split()
         if not parts:
@@ -1834,6 +1986,15 @@ class ScorpionShell:
         if not ip:
             print(co("Usage: reverse IP", C.RED)); return
         reverse_lookup(self.resolver, ip)
+
+    def do_analyze(self, args):
+        domain = args.strip()
+        if not domain:
+            print(co("Usage: analyze DOMAIN", C.RED)); return
+        self.last_domain  = domain
+        r = deep_analyze(self.resolver, domain, self.mode)
+        r["domain"]       = domain
+        self.last_results = r
 
     def do_propagation(self, args):
         p = args.split()
@@ -1886,6 +2047,7 @@ class ScorpionShell:
         types = [t.upper() for t in p[1:]] or None
         bulk_lookup(self.resolver, p[0], types)
 
+    # ── NEW v1.1 ──────────────────────────────────────────
     def do_asn(self, args):
         ip = args.strip()
         if not ip:
@@ -1928,6 +2090,7 @@ class ScorpionShell:
         )
         self.last_domain = domain
 
+    # ── Export / Settings ─────────────────────────────────
     def do_export(self, args):
         p = args.split()
         if not p:
@@ -1989,62 +2152,82 @@ class ScorpionShell:
 {co('  ⚡ Sailerbross Technology', C.MAGENTA)}
 {co('═'*62, C.CYAN)}
 
-{co('── QUICK START ─────────────────────────────────────', C.YELLOW)}
-  {co('lookup google.com', C.GREEN)}              all DNS records
-  {co('autorecon example.com', C.GREEN)}          FULL audit + HTML report
+{co('── CORE LOOKUP ─────────────────────────────────────', C.YELLOW)}
+  {co('lookup google.com', C.GREEN)}              all records
+  {co('lookup github.com A MX TXT', C.GREEN)}     specific types
+  {co('reverse 8.8.8.8', C.GREEN)}               PTR reverse lookup
+  {co('analyze example.com', C.GREEN)}            deep DNS analysis
 
-{co('── NEW v1.1 POWER FEATURES ─────────────────────────', C.YELLOW)}
-  {co('asn 216.58.223.206', C.GREEN)}             IP owner, ASN, country
-  {co('ssl google.com', C.GREEN)}                 certificate + expiry
-  {co('headers github.com', C.GREEN)}             security header grade
-  {co('spoof example.com', C.GREEN)}              can domain be spoofed?
+{co('── NEW v1.1 FEATURES ───────────────────────────────', C.YELLOW)}
+  {co('asn 216.58.223.206', C.GREEN)}             IP owner + ASN + country
+  {co('ssl google.com', C.GREEN)}                 TLS cert details + expiry
+  {co('headers github.com', C.GREEN)}             HTTP security header grade
+  {co('spoof example.com', C.GREEN)}              can this domain be spoofed?
+  {co('autorecon example.com', C.GREEN)}          runs ALL modules + HTML report
 
-{co('── CLASSIC FEATURES ────────────────────────────────', C.YELLOW)}
-  {co('reverse 8.8.8.8', C.GREEN)}                PTR lookup
-  {co('propagation example.com A', C.GREEN)}      15 global DNS check
-  {co('axfr example.com', C.GREEN)}              zone transfer test
-  {co('compare google.com bing.com', C.GREEN)}    side-by-side
+{co('── PROPAGATION / ZONE ──────────────────────────────', C.YELLOW)}
+  {co('propagation example.com A', C.GREEN)}      check 15 global DNS servers
+  {co('axfr example.com', C.GREEN)}              zone transfer attempt
 
-{co('── SETTINGS ─────────────────────────────────────────', C.YELLOW)}
+{co('── COMPARE / TRACK ─────────────────────────────────', C.YELLOW)}
+  {co('compare google.com bing.com', C.GREEN)}    side-by-side diff
+  {co('snapshot example.com', C.GREEN)}           save DNS state
+  {co('diff example.com', C.GREEN)}              show DNS changes
+
+{co('── BULK / EXPORT ───────────────────────────────────', C.YELLOW)}
+  {co('bulk domains.txt A MX', C.GREEN)}          scan from file
+  {co('export report html', C.GREEN)}             full HTML report
+
+{co('── CONFIGURE ───────────────────────────────────────', C.YELLOW)}
   {co('set resolver 1.1.1.1,8.8.8.8', C.GREEN)}
-  {co('set mode expert', C.GREEN)}               show TTL + raw
-  {co('set output html', C.GREEN)}               default export
-  {co('info', C.GREEN)}                          show config
+  {co('set mode expert', C.GREEN)}               show TTL + raw data
+  {co('set timeout 3', C.GREEN)}
+  {co('set output json', C.GREEN)}
+  {co('info', C.GREEN)}                          show current settings
 
-{co('⚠  LEGAL: Only audit domains you own or have permission.', C.RED, C.BOLD)}
+{co('⚠  LEGAL: Only audit domains you own or have permission for.', C.RED, C.BOLD)}
 {co('═'*62, C.CYAN)}
 """)
 
     def do_help(self, _=None):
         print(f"""
 {co('═'*62, C.CYAN)}
-{co(' 🦂 DNS SCORPION v1.1 — ALL COMMANDS', C.BOLD)}
+{co(' 🦂 DNS SCORPION v1.1 — COMMAND REFERENCE', C.BOLD)}
 {co('═'*62, C.CYAN)}
 
-{co('CORE', C.YELLOW)}
-  lookup DOMAIN [TYPE ...]
-  reverse IP
-  propagation DOMAIN [TYPE]
-  axfr DOMAIN
+{co('LOOKUP', C.YELLOW)}
+  lookup DOMAIN [TYPE ...]   full DNS / specific types
+  reverse IP                 PTR reverse lookup
+  analyze DOMAIN             deep analysis + score
 
-{co('v1.1 NEW', C.GREEN+C.BOLD)}
-  asn IP
-  ssl DOMAIN [PORT]
-  headers DOMAIN
-  spoof DOMAIN
-  autorecon DOMAIN [out] [fmt]
+{co('NEW v1.1', C.GREEN+C.BOLD)}
+  asn IP                     ASN, org, country lookup
+  ssl DOMAIN [PORT]          TLS certificate details
+  headers DOMAIN             HTTP security header audit
+  spoof DOMAIN               email spoofing risk test
+  autorecon DOMAIN [out] [fmt]  full automated audit → report
 
-{co('UTILS', C.YELLOW)}
-  compare A B [types]
-  snapshot / diff DOMAIN
-  bulk FILE [types]
-  export FILE [fmt]
+{co('PROPAGATION / SECURITY', C.YELLOW)}
+  propagation DOMAIN [TYPE]  check 15 global servers
+  axfr DOMAIN                zone transfer attempt
 
-{co('CONFIG', C.YELLOW)}
-  set resolver|timeout|mode|output
-  info
+{co('COMPARE / TRACK', C.YELLOW)}
+  compare DOMAIN_A DOMAIN_B  side-by-side
+  snapshot DOMAIN            save DNS snapshot
+  diff DOMAIN                show changes
 
-{co('HELP', C.YELLOW)}
+{co('BULK / EXPORT', C.YELLOW)}
+  bulk FILE [types]          batch domain lookup
+  export FILE [fmt]          txt | json | csv | html
+
+{co('SETTINGS', C.YELLOW)}
+  set resolver IP[,IP] | auto
+  set timeout N
+  set mode normal | expert | quiet
+  set output txt | json | csv | html
+  info                       current settings
+
+{co('OTHER', C.YELLOW)}
   tutorial   help / ?   exit / quit
 {co('═'*62, C.CYAN)}
 """)
@@ -2075,14 +2258,16 @@ class ScorpionShell:
             C.CYAN
         ))
         print(co(
-            "  Type {co('autorecon DOMAIN', C.GREEN)} for full audit | "
-            "'tutorial' to learn | 'help' for commands\n",
+            "  'tutorial' → learn | 'help' → commands | "
+            "'autorecon DOMAIN' → full audit\n",
             C.DIM
         ))
 
         CMDS = {
+            # core
             "lookup":      self.do_lookup,
             "reverse":     self.do_reverse,
+            "analyze":     self.do_analyze,
             "propagation": self.do_propagation,
             "prop":        self.do_propagation,
             "axfr":        self.do_axfr,
@@ -2090,11 +2275,13 @@ class ScorpionShell:
             "snapshot":    self.do_snapshot,
             "diff":        self.do_diff,
             "bulk":        self.do_bulk,
+            # new
             "asn":         self.do_asn,
             "ssl":         self.do_ssl,
             "headers":     self.do_headers,
             "spoof":       self.do_spoof,
             "autorecon":   self.do_autorecon,
+            # utils
             "export":      self.do_export,
             "set":         self.do_set,
             "info":        self.do_info,
@@ -2133,13 +2320,25 @@ class ScorpionShell:
 # ============================================================
 def main_direct():
     p = argparse.ArgumentParser(
-        description="DNS Scorpion v1.1 FINAL — Sailerbross Technology"
+        description="DNS Scorpion v1.1 — Sailerbross Technology"
     )
     sub = p.add_subparsers(dest="command")
 
-    for cmd in ["lookup", "reverse", "propagation", "axfr", "compare",
-                "bulk", "asn", "ssl", "headers", "spoof", "autorecon"]:
-        sp = sub.add_parser(cmd)
+    for cmd, help_txt in [
+        ("lookup",      "DNS lookup"),
+        ("analyze",     "Deep analysis"),
+        ("reverse",     "Reverse PTR lookup"),
+        ("propagation", "Propagation check"),
+        ("axfr",        "Zone transfer"),
+        ("compare",     "Compare two domains"),
+        ("bulk",        "Bulk domain lookup"),
+        ("asn",         "ASN/IP lookup"),
+        ("ssl",         "SSL certificate info"),
+        ("headers",     "HTTP security headers"),
+        ("spoof",       "Email spoof test"),
+        ("autorecon",   "Full automated recon"),
+    ]:
+        sp = sub.add_parser(cmd, help=help_txt)
         if cmd == "lookup":
             sp.add_argument("domain")
             sp.add_argument("types", nargs="*")
@@ -2156,17 +2355,21 @@ def main_direct():
         elif cmd == "ssl":
             sp.add_argument("domain")
             sp.add_argument("port", nargs="?", type=int, default=443)
-        elif cmd in ["reverse", "asn"]:
+        elif cmd == "reverse":
+            sp.add_argument("ip")
+        elif cmd == "asn":
             sp.add_argument("ip")
         else:
             sp.add_argument("domain")
 
     p.add_argument("--resolver")
     p.add_argument("--timeout", type=int, default=5)
-    p.add_argument("--mode", default="normal",
+    p.add_argument("--mode",
+                   default="normal",
                    choices=["normal","expert","quiet"])
     p.add_argument("--output")
-    p.add_argument("--format", default="html",
+    p.add_argument("--format",
+                   default="html",
                    choices=["txt","json","csv","html"])
 
     args = p.parse_args()
@@ -2191,6 +2394,11 @@ def main_direct():
                              for rt,rs in recs.items()}},
                 args.output, args.format
             )
+    elif cmd == "analyze":
+        r = deep_analyze(resolver, args.domain, args.mode)
+        r["domain"] = args.domain
+        if args.output:
+            export_results(r, args.output, args.format)
     elif cmd == "reverse":
         reverse_lookup(resolver, args.ip)
     elif cmd == "propagation":
@@ -2223,12 +2431,18 @@ def main_direct():
         )
     else:
         p.print_help()
-        print(f"\n{co('Quick examples:', C.YELLOW)}")
-        print(f"  {co('python dns_scorpion.py autorecon google.com', C.GREEN)}")
-        print(f"  {co('python dns_scorpion.py ssl cloudflare.com', C.GREEN)}")
-        print(f"  {co('python dns_scorpion.py headers github.com', C.GREEN)}")
-        print(f"  {co('python dns_scorpion.py spoof example.com', C.GREEN)}")
-        print(f"  {co('python dns_scorpion.py asn 8.8.8.8', C.GREEN)}")
+        print(f"\n{co('Quick start:', C.YELLOW)}")
+        for ex in [
+            "python dns_scorpion.py autorecon google.com",
+            "python dns_scorpion.py lookup github.com",
+            "python dns_scorpion.py analyze example.com",
+            "python dns_scorpion.py ssl cloudflare.com",
+            "python dns_scorpion.py headers github.com",
+            "python dns_scorpion.py spoof example.com",
+            "python dns_scorpion.py asn 8.8.8.8",
+            "python dns_scorpion.py propagation google.com A",
+        ]:
+            print(f"  {co(ex, C.GREEN)}")
 
 # ============================================================
 # ENTRY POINT
